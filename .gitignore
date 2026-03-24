@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Environment variables (NEVER commit these)
+.env
+
+# Firebase service account key (NEVER commit this)
+serviceAccountKey.json
+*.json.key
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db

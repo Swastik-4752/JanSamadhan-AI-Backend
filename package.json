@@ -1,0 +1,34 @@
+{
+  "name": "jansamadhan-backend",
+  "version": "1.0.0",
+  "description": "JanSamadhan WhatsApp complaint backend using Twilio and Firebase Firestore",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "firebase-admin": "^12.1.0",
+    "node-fetch": "^2.7.0",
+    "twilio": "^5.13.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "whatsapp",
+    "twilio",
+    "firebase",
+    "complaints",
+    "jansamadhan"
+  ],
+  "author": "",
+  "license": "ISC"
+}
