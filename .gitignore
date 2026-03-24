@@ -6,7 +6,10 @@ node_modules/
 
 # Firebase service account key (NEVER commit this)
 serviceAccountKey.json
+serviceAccountKey.json.json
 *.json.key
+push_error.txt
+
 
 # Logs
 logs/

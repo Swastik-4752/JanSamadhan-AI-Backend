@@ -5,6 +5,7 @@ const cors = require("cors");
 const fetch = require("node-fetch");
 const twilio = require("twilio");  // lazy-initialized inside sendWhatsAppUpdate
 const db = require("./firebase");
+const { uploadTwilioImageToCloudinary } = require("./cloudinary");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -89,8 +90,8 @@ Return ONLY the category name. No explanation.`,
   return category || null;
 }
 
-// ─── Send WhatsApp Notification (outbound, for admin status updates) ──────────
-async function sendWhatsAppUpdate(phone, message) {
+// ─── Send WhatsApp Notification (with optional image) ─────────────────────────
+async function sendWhatsAppUpdate(phone, message, imageUrl = null) {
   try {
     const sid = process.env.TWILIO_ACCOUNT_SID;
     const token = process.env.TWILIO_AUTH_TOKEN;
@@ -99,20 +100,72 @@ async function sendWhatsAppUpdate(phone, message) {
       return;
     }
     const client = twilio(sid, token);
-    await client.messages.create({
+    const msgPayload = {
       from: TWILIO_WHATSAPP_NUMBER,
       to: phone,
       body: message,
-    });
+    };
+    if (imageUrl) {
+      msgPayload.mediaUrl = [imageUrl];
+      console.log("🖼️  Sending resolution image to user");
+    }
+    await client.messages.create(msgPayload);
     console.log(`🔔 Notification sent to: ${phone}`);
   } catch (error) {
     console.log("⚠️  Notification failed:", error.message);
   }
 }
 
-// ─── Admin: Update Complaint Status + Notify User ─────────────────────────────
-// Call this from your admin panel/API to update status and notify via WhatsApp
+// ─── POST /update-status ──────────────────────────────────────────────────────
+app.post("/update-status", async (req, res) => {
+  try {
+    const { trackingId, newStatus } = req.body;
+
+    if (!trackingId || !newStatus) {
+      return res.json({ success: false, message: "trackingId and newStatus are required" });
+    }
+
+    const snapshot = await db.collection("complaints")
+      .where("trackingId", "==", trackingId)
+      .get();
+
+    if (snapshot.empty) {
+      return res.json({ success: false, message: "Complaint not found" });
+    }
+
+    const doc = snapshot.docs[0];
+    const data = doc.data();
+
+    await doc.ref.update({ status: newStatus });
+
+    const isResolved = newStatus.toLowerCase() === "resolved";
+    const msgBody = isResolved
+      ? `✅ Your complaint has been Resolved!\n\nTracking ID: ${data.trackingId}\nCategory: ${data.category}\n\nThank you for using JanSamadhan 🙏`
+      : `🔔 Update on your complaint!\n\nTracking ID: ${data.trackingId}\nStatus: *${newStatus}*\nCategory: ${data.category}\n\nTrack: https://jansamadhan-ai.web.app/track?id=${data.trackingId}`;
+
+    // Send image back to user only when Resolved and imageUrl exists
+    await sendWhatsAppUpdate(
+      data.phone,
+      msgBody,
+      isResolved && data.imageUrl ? data.imageUrl : null
+    );
+
+    if (isResolved && data.imageUrl) {
+      console.log("📸 Sent resolution image to:", data.phone);
+    }
+
+    console.log(`✅ Status updated: ${trackingId} → ${newStatus}`);
+    return res.json({ success: true, trackingId, newStatus });
+
+  } catch (error) {
+    console.error("❌ update-status error:", error);
+    return res.json({ success: false, error: error.message });
+  }
+});
+
+// ─── POST /admin/update-status (alias) ────────────────────────────────────────
 app.post("/admin/update-status", async (req, res) => {
+  // Same logic as /update-status, just uses docId instead of trackingId
   try {
     const { docId, newStatus } = req.body;
 
@@ -128,20 +181,24 @@ app.post("/admin/update-status", async (req, res) => {
     }
 
     const complaint = doc.data();
-
     await docRef.update({ status: newStatus });
 
-    // Send WhatsApp notification to the citizen
+    const isResolved = newStatus.toLowerCase() === "resolved";
+    const msgBody = isResolved
+      ? `✅ Your complaint has been Resolved!\n\nTracking ID: ${complaint.trackingId}\nCategory: ${complaint.category}\n\nThank you for using JanSamadhan 🙏`
+      : `🔔 Update on your complaint!\n\nTracking ID: ${complaint.trackingId}\nStatus: *${newStatus}*\nCategory: ${complaint.category}`;
+
     await sendWhatsAppUpdate(
       complaint.phone,
-      `🔔 Update on your complaint!\n\nTracking ID: ${complaint.trackingId}\nStatus: *${newStatus}*\nCategory: ${complaint.category}\n\nTrack: https://jansamadhan-ai.web.app/track?id=${complaint.trackingId}`
+      msgBody,
+      isResolved && complaint.imageUrl ? complaint.imageUrl : null
     );
 
-    console.log(`✅ Status updated: ${docId} → ${newStatus}`);
+    console.log(`✅ Admin status updated: ${docId} → ${newStatus}`);
     res.json({ success: true, trackingId: complaint.trackingId, status: newStatus });
 
   } catch (error) {
-    console.error("❌ Status update error:", error);
+    console.error("❌ Admin update-status error:", error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -152,12 +209,15 @@ app.post("/webhook/whatsapp", async (req, res) => {
     const message = (req.body.Body || "").trim();
     const sender = req.body.From;
     const incomingText = message.toLowerCase();
+    const numMedia = parseInt(req.body.NumMedia || "0", 10);
+    const mediaUrl = req.body.MediaUrl0 || null;
 
     console.log("─────────────────────────────────────");
     console.log(`📩 From   : ${sender}`);
     console.log(`   Message: ${message}`);
+    if (numMedia > 0) console.log(`   Media  : ${mediaUrl}`);
 
-    // ── TRACK COMMAND (check before session logic) ─────────────────────────
+    // ── TRACK COMMAND ──────────────────────────────────────────────────────
     if (incomingText.startsWith("track")) {
       const parts = message.trim().split(/\s+/);
       const trackingId = parts[1];
@@ -226,12 +286,13 @@ Please enter your *full name* to begin:
 Please *describe your complaint* in detail:</Message></Response>`);
     }
 
-    // ── Step: description (100% sync — no Groq here) ──────────────────────
+    // ── Step: description (100% sync — keyword only) ───────────────────────
     else if (session.step === "description") {
       session.data.description = message;
       const category = keywordClassify(message);
       session.data.category = category;
-      session.step = "location";
+      session.data.imageUrl = null; // init image field
+      session.step = "photo";
 
       console.log(`   Description: ${message}`);
       console.log(`   Category (keyword): ${category}`);
@@ -240,7 +301,60 @@ Please *describe your complaint* in detail:</Message></Response>`);
       res.set("Content-Type", "text/xml");
       return res.send(`<Response><Message>Category detected: ${xmlEscape(category)}
 
+📸 Please upload a *photo* of the issue, or type *skip* to continue without one:</Message></Response>`);
+    }
+
+    // ── Step: photo — handle image or skip ────────────────────────────────
+    else if (session.step === "photo") {
+      let imageUrl = null;
+
+      if (numMedia > 0 && mediaUrl) {
+        // User sent an image — upload to Cloudinary in the background after reply
+        // For now use a temp tracking id
+        const tempId = "TEMP-" + Date.now();
+
+        // We need to respond to Twilio FAST — fire image upload in background
+        session.step = "location";
+        session.data.pendingMediaUrl = mediaUrl; // store for background upload
+        session.data.tempId = tempId;
+
+        console.log("Sending response at step: photo (with image)");
+        res.set("Content-Type", "text/xml");
+        res.send(`<Response><Message>✅ Photo received! Processing in background.
+
 Now enter *location details* (area, landmark, street name):</Message></Response>`);
+
+        // Background: Download from Twilio + Upload to Cloudinary
+        setTimeout(async () => {
+          try {
+            const url = await uploadTwilioImageToCloudinary(mediaUrl, tempId);
+            session.data.imageUrl = url;
+            console.log("☁️  Image ready in session:", url);
+          } catch (err) {
+            console.log("⚠️  Image upload failed:", err.message);
+            session.data.imageUrl = null;
+          }
+        }, 0);
+
+        return;
+
+      } else if (incomingText === "skip") {
+        // User skipped
+        session.data.imageUrl = null;
+        session.step = "location";
+        console.log("Sending response at step: photo (skipped)");
+        res.set("Content-Type", "text/xml");
+        return res.send(`<Response><Message>No problem! 
+
+Now enter *location details* (area, landmark, street name):</Message></Response>`);
+
+      } else {
+        // Neither image nor skip — re-prompt
+        res.set("Content-Type", "text/xml");
+        return res.send(`<Response><Message>Please either:
+📸 Send a *photo* of the issue, or
+Type *skip* to continue without one.</Message></Response>`);
+      }
     }
 
     // ── Step: location ─────────────────────────────────────────────────────
@@ -264,6 +378,15 @@ Reply with 1 or 2:</Message></Response>`);
       const trackingId = "JS-" + Date.now();
       const trackingLink = `https://jansamadhan-ai.web.app/track?id=${trackingId}`;
 
+      // If Cloudinary upload is still pending, wait briefly (max 5s)
+      if (session.data.pendingMediaUrl && session.data.imageUrl === null) {
+        let waited = 0;
+        while (session.data.imageUrl === null && waited < 5000) {
+          await new Promise((r) => setTimeout(r, 300));
+          waited += 300;
+        }
+      }
+
       const complaintData = {
         name: session.data.name,
         phone: session.data.phone,
@@ -271,6 +394,7 @@ Reply with 1 or 2:</Message></Response>`);
         location: session.data.location,
         category: session.data.category,
         priority: session.data.priority,
+        imageUrl: session.data.imageUrl || null,
         source: "WhatsApp",
         status: "Pending",
         trackingId: trackingId,
@@ -281,7 +405,7 @@ Reply with 1 or 2:</Message></Response>`);
       const docId = docRef.id;
       const description = session.data.description;
 
-      console.log(`✅ Complaint saved | ID: ${trackingId} | Doc: ${docId}`);
+      console.log(`✅ Complaint saved | ID: ${trackingId} | Doc: ${docId} | Image: ${complaintData.imageUrl || "none"}`);
       delete sessions[sender];
 
       console.log("Sending response at step: priority");
@@ -292,13 +416,14 @@ Tracking ID: ${xmlEscape(trackingId)}
 Category: ${xmlEscape(complaintData.category)}
 Priority: ${xmlEscape(complaintData.priority)}
 Location: ${xmlEscape(complaintData.location)}
+${complaintData.imageUrl ? "📸 Photo attached: Yes" : ""}
 
 Track your complaint:
 ${trackingLink}
 
 You will be notified when status updates.</Message></Response>`);
 
-      // Background: Groq reclassifies and updates Firestore (after res sent)
+      // Background: Groq reclassification (after response sent)
       setTimeout(async () => {
         try {
           const aiCategory = await classifyWithGroq(description);
@@ -329,42 +454,6 @@ To track: track JS-XXXX</Message></Response>`);
   }
 });
 
-// ─── POST /update-status ──────────────────────────────────────────────────────
-app.post("/update-status", async (req, res) => {
-  try {
-    const { trackingId, newStatus } = req.body;
-
-    if (!trackingId || !newStatus) {
-      return res.json({ success: false, message: "trackingId and newStatus are required" });
-    }
-
-    const snapshot = await db.collection("complaints")
-      .where("trackingId", "==", trackingId)
-      .get();
-
-    if (snapshot.empty) {
-      return res.json({ success: false, message: "Complaint not found" });
-    }
-
-    const doc = snapshot.docs[0];
-    const data = doc.data();
-
-    await doc.ref.update({ status: newStatus });
-
-    await sendWhatsAppUpdate(
-      data.phone,
-      `🔔 Update on your complaint!\n\nTracking ID: ${data.trackingId}\nStatus: *${newStatus}*\nCategory: ${data.category}\n\nTrack: https://jansamadhan-ai.web.app/track?id=${data.trackingId}`
-    );
-
-    console.log(`✅ Status updated: ${trackingId} → ${newStatus}`);
-    return res.json({ success: true, trackingId, newStatus });
-
-  } catch (error) {
-    console.error("❌ update-status error:", error);
-    return res.json({ success: false, error: error.message });
-  }
-});
-
 // ─── Start Server ─────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`🚀 JanSamadhan Backend running on port ${PORT}`);
@@ -373,5 +462,5 @@ app.listen(PORT, () => {
   console.log(`   Admin Panel   : POST http://localhost:${PORT}/admin/update-status`);
 });
 
-// ─── Export notification helper (for use in other files if needed) ────────────
+// ─── Export notification helper ───────────────────────────────────────────────
 module.exports = { sendWhatsAppUpdate };
