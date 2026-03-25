@@ -415,16 +415,16 @@ app.post("/webhook/whatsapp", (req, res) => {
 
     // ── ALWAYS send TwiML ─────────────────────────────────────────────────
     twiml.message(replyText);
+    const twimlStr = twiml.toString();
     console.log("Replying with:", replyText.substring(0, 80));
-    res.writeHead(200, { "Content-Type": "text/xml" });
-    res.end(twiml.toString());
+    console.log("TwiML XML:", twimlStr);
+    res.type("text/xml").send(twimlStr);
 
   } catch (err) {
     console.error("Webhook error:", err);
     const fallback = new twilio.twiml.MessagingResponse();
     fallback.message("Server error, please try again.");
-    res.writeHead(200, { "Content-Type": "text/xml" });
-    res.end(fallback.toString());
+    res.type("text/xml").send(fallback.toString());
   }
 });
 
