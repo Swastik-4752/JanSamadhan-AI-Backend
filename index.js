@@ -214,6 +214,13 @@ app.post("/webhook/whatsapp", (req, res) => {
 
   // 🚨 ALL logic runs AFTER response is sent
   setImmediate(async () => {
+    // ── Extract request data FIRST so sender is available everywhere ─────
+    const sender = req.body.From;
+    const message = (req.body.Body || "").trim();
+    const incomingText = message.toLowerCase();
+    const numMedia = parseInt(req.body.NumMedia || "0", 10);
+    const mediaUrl = req.body.MediaUrl0 || null;
+
     // ── Message lock: ensures only ONE outgoing message per request ──────
     let messageSent = false;
     async function sendOnce(text, imageUrl = null) {
@@ -227,11 +234,6 @@ app.post("/webhook/whatsapp", (req, res) => {
     }
 
     try {
-      const message = (req.body.Body || "").trim();
-      const sender = req.body.From;
-      const incomingText = message.toLowerCase();
-      const numMedia = parseInt(req.body.NumMedia || "0", 10);
-      const mediaUrl = req.body.MediaUrl0 || null;
 
       console.log("─────────────────────────────────────");
       console.log(`From   : ${sender}`);
