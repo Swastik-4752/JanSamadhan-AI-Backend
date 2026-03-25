@@ -117,6 +117,13 @@ app.post("/update-status", async (req, res) => {
 
     const doc = snapshot.docs[0];
     const data = doc.data();
+
+    // ✅ Skip notification if status hasn't changed
+    if (data.status === newStatus) {
+      console.log(`Status unchanged (${newStatus}) — no notification sent.`);
+      return res.json({ success: true, trackingId, newStatus, skipped: true });
+    }
+
     const isResolved = newStatus.toLowerCase() === "resolved";
 
     // Build Firestore update
@@ -126,10 +133,7 @@ app.post("/update-status", async (req, res) => {
       console.log("Admin resolution image saved to Firestore:", resolutionImageUrl);
     }
     await doc.ref.set(updatePayload, { merge: true });
-
-    // Verify update
-    const updated = await doc.ref.get();
-    console.log("Firestore after status update:", JSON.stringify(updated.data()));
+    console.log(`Status updated: ${trackingId} => ${newStatus}`);
 
     // Pick image to send in notification — prefer admin-supplied, fall back to stored
     const notifImage = isResolved
@@ -137,15 +141,10 @@ app.post("/update-status", async (req, res) => {
       : null;
 
     const msgBody = isResolved
-      ? `Complaint Resolved!\n\nTracking ID: ${data.trackingId}\nCategory: ${data.category}\n\nThank you for using JanSamadhan`
-      : `Update: Tracking ID ${data.trackingId} is now *${newStatus}*\n\nTrack: https://jansamadhan-ai.web.app/track?id=${data.trackingId}`;
+      ? `✅ Complaint Resolved!\n\nTracking ID: ${data.trackingId}\nCategory: ${data.category}\n\nThank you for using JanSamadhan.`
+      : `📋 Update: Your complaint *${data.trackingId}* is now *${newStatus}*.\n\nTrack: https://jansamadhan-ai.web.app/track?id=${data.trackingId}`;
 
     await sendWhatsAppUpdate(data.phone, msgBody, notifImage);
-    if (isResolved && notifImage) {
-      console.log("Resolution WhatsApp sent with image to:", data.phone);
-    }
-
-    console.log(`Status updated: ${trackingId} => ${newStatus}`);
     return res.json({ success: true, trackingId, newStatus });
 
   } catch (error) {
@@ -171,6 +170,13 @@ app.post("/admin/update-status", async (req, res) => {
     }
 
     const complaint = doc.data();
+
+    // ✅ Skip notification if status hasn't changed
+    if (complaint.status === newStatus) {
+      console.log(`Admin: status unchanged (${newStatus}) — no notification sent.`);
+      return res.json({ success: true, trackingId: complaint.trackingId, status: newStatus, skipped: true });
+    }
+
     const isResolved = newStatus.toLowerCase() === "resolved";
 
     const updatePayload = { status: newStatus };
@@ -179,25 +185,17 @@ app.post("/admin/update-status", async (req, res) => {
       console.log("Admin resolution image saved to Firestore:", resolutionImageUrl);
     }
     await docRef.set(updatePayload, { merge: true });
-
-    // Verify update
-    const updated = await docRef.get();
-    console.log("Firestore after admin update:", JSON.stringify(updated.data()));
+    console.log(`Admin status updated: ${docId} => ${newStatus}`);
 
     const notifImage = isResolved
       ? (resolutionImageUrl || complaint.resolutionImageUrl || null)
       : null;
 
     const msgBody = isResolved
-      ? `Complaint Resolved!\n\nTracking ID: ${complaint.trackingId}\nCategory: ${complaint.category}\n\nThank you for using JanSamadhan`
-      : `Update: Tracking ID ${complaint.trackingId} is now *${newStatus}*`;
+      ? `✅ Complaint Resolved!\n\nTracking ID: ${complaint.trackingId}\nCategory: ${complaint.category}\n\nThank you for using JanSamadhan.`
+      : `📋 Update: Your complaint *${complaint.trackingId}* is now *${newStatus}*`;
 
     await sendWhatsAppUpdate(complaint.phone, msgBody, notifImage);
-    if (isResolved && notifImage) {
-      console.log("Resolution WhatsApp sent with image to:", complaint.phone);
-    }
-
-    console.log(`Admin status updated: ${docId} => ${newStatus}`);
     res.json({ success: true, trackingId: complaint.trackingId, status: newStatus });
 
   } catch (error) {
@@ -209,13 +207,25 @@ app.post("/admin/update-status", async (req, res) => {
 // ─── WhatsApp Webhook ─────────────────────────────────────────────────────────
 // Strategy: respond with empty TwiML immediately (satisfies Twilio's HTTP requirement),
 // then send ALL replies via Twilio REST API (sendWhatsAppUpdate) in setImmediate.
-// This is proven to work — the sandbox join confirmation uses the same REST API path.
+// ONE message per user action — enforced by messageSent guard.
 app.post("/webhook/whatsapp", (req, res) => {
-  // ✅ RESPOND INSTANTLY with empty TwiML — never block on this
+  // ✅ RESPOND INSTANTLY with empty TwiML — Twilio requires HTTP response < 15s
   res.type("text/xml").send("<Response></Response>");
 
-  // 🚨 ALL logic runs AFTER response
+  // 🚨 ALL logic runs AFTER response is sent
   setImmediate(async () => {
+    // ── Message lock: ensures only ONE outgoing message per request ──────
+    let messageSent = false;
+    async function sendOnce(text, imageUrl = null) {
+      if (messageSent) {
+        console.log("[GUARD] Duplicate send prevented:", text.substring(0, 60));
+        return;
+      }
+      messageSent = true;
+      console.log("Sending reply:", text.substring(0, 80));
+      await sendWhatsAppUpdate(sender, text, imageUrl);
+    }
+
     try {
       const message = (req.body.Body || "").trim();
       const sender = req.body.From;
@@ -228,172 +238,156 @@ app.post("/webhook/whatsapp", (req, res) => {
       console.log(`Message: ${message}`);
       if (numMedia > 0) console.log(`Media  : ${mediaUrl}`);
 
-      let replyText = "";
-
       // ── TRACK COMMAND ────────────────────────────────────────────────────
       if (incomingText.startsWith("track")) {
         const parts = message.trim().split(/\s+/);
         const trackingId = parts[1];
 
         if (!trackingId) {
-          replyText = "Please provide your tracking ID:\n\ntrack JS-1234567890";
+          // Single reply: instruct user how to track
+          await sendOnce("Please provide your tracking ID.\n\nExample: track JS-1234567890");
         } else {
-          await sendWhatsAppUpdate(sender, "🔍 Looking up your complaint... Status coming shortly.");
+          console.log("Track lookup for:", trackingId);
           try {
             const snapshot = await db.collection("complaints")
               .where("trackingId", "==", trackingId.toUpperCase())
               .get();
             if (snapshot.empty) {
-              await sendWhatsAppUpdate(sender, `No complaint found for tracking ID: ${trackingId}`);
+              await sendOnce(`No complaint found for tracking ID: ${trackingId.toUpperCase()}`);
             } else {
               const data = snapshot.docs[0].data();
-              await sendWhatsAppUpdate(sender,
-                `Complaint Status\n\nTracking ID: ${data.trackingId}\nStatus: ${data.status}\nCategory: ${data.category}\nLocation: ${data.location}\nPriority: ${data.priority}\n\nTrack: https://jansamadhan-ai.web.app/track?id=${data.trackingId}`
+              await sendOnce(
+                `📋 Complaint Status\n\nID: ${data.trackingId}\nStatus: *${data.status}*\nCategory: ${data.category}\nLocation: ${data.location}\nPriority: ${data.priority}\n\nTrack: https://jansamadhan-ai.web.app/track?id=${data.trackingId}`
               );
             }
           } catch (err) {
             console.error("Track lookup error:", err);
-            await sendWhatsAppUpdate(sender, "Could not fetch complaint status. Please try again.");
+            await sendOnce("Could not fetch complaint status. Please try again.");
           }
-          return; // already sent replies above
         }
+        return;
       }
 
       // ── No session => Start flow ─────────────────────────────────────────
-      else if (!sessions[sender]) {
+      if (!sessions[sender]) {
         sessions[sender] = { step: "name", data: { phone: sender } };
-        replyText = "Welcome to JanSamadhan AI 🙏\n\nYour complaints reach the right authorities instantly.\n\nPlease enter your *full name* to begin:\n\n(To track status: track JS-XXXX)";
+        await sendOnce("Welcome to JanSamadhan AI 🙏\n\nPlease enter your *full name*:");
+        return;
       }
 
-      else {
-        const session = sessions[sender];
-        console.log(`Step   : ${session.step}`);
+      const session = sessions[sender];
+      console.log(`Step   : ${session.step}`);
 
-        // ── Step: name ───────────────────────────────────────────────────
-        if (session.step === "name") {
-          session.data.name = message;
-          session.step = "description";
-          replyText = `Hello ${session.data.name}! 👋\n\nPlease *describe your complaint* in detail:`;
+      // ── Step: name ─────────────────────────────────────────────────────
+      if (session.step === "name") {
+        session.data.name = message;
+        session.step = "description";
+        await sendOnce(`Hello ${session.data.name}! 👋\n\nDescribe your complaint in detail:`);
+
+      // ── Step: description ───────────────────────────────────────────────
+      } else if (session.step === "description") {
+        session.data.description = message;
+        const category = keywordClassify(message);
+        session.data.category = category;
+        const trackingId = "JS-" + Date.now();
+        session.data.trackingId = trackingId;
+
+        // Background: pre-create Firestore doc
+        try {
+          const docRef = await db.collection("complaints").add({
+            name: session.data.name,
+            phone: session.data.phone,
+            description: message,
+            category,
+            status: "Draft",
+            imageUrl: null,
+            resolutionImageUrl: null,
+            trackingId,
+            source: "WhatsApp",
+            createdAt: new Date(),
+          });
+          session.data.docId = docRef.id;
+          console.log(`Pre-created Firestore doc: ${docRef.id} | trackingId: ${trackingId}`);
+        } catch (err) {
+          console.error("Firestore pre-create error:", err);
         }
+        session.step = "photo";
+        await sendOnce(`Category: *${category}*\n\nSend a *photo* of the issue, or type *skip*:`);
 
-        // ── Step: description ────────────────────────────────────────────
-        else if (session.step === "description") {
-          session.data.description = message;
-          const category = keywordClassify(message);
-          session.data.category = category;
-          const trackingId = "JS-" + Date.now();
-          session.data.trackingId = trackingId;
-          replyText = `Category detected: *${category}*\n\nPlease upload a *photo* of the issue, or type *skip* to continue:`;
+      // ── Step: photo ─────────────────────────────────────────────────────
+      } else if (session.step === "photo") {
+        if (numMedia > 0 && mediaUrl) {
+          session.step = "location";
+          // Send ONE reply immediately — image upload is fully in background
+          await sendOnce("📸 Photo received.\n\nEnter *location details* (area, landmark, street):");
 
-          // Background: pre-create Firestore doc
+          // Background: upload to Cloudinary and save to Firestore (NO extra messages)
+          const docId = session.data.docId;
+          const trackingId = session.data.trackingId;
+          console.log("Uploading user image to Cloudinary...");
           try {
-            const docRef = await db.collection("complaints").add({
-              name: session.data.name,
-              phone: session.data.phone,
-              description: message,
-              category,
-              status: "Draft",
-              imageUrl: null,
-              resolutionImageUrl: null,
-              trackingId,
-              source: "WhatsApp",
-              createdAt: new Date(),
-            });
-            session.data.docId = docRef.id;
-            session.step = "photo";
-            console.log(`Pre-created Firestore doc: ${docRef.id} | trackingId: ${trackingId}`);
+            const url = await uploadTwilioImageToCloudinary(mediaUrl, trackingId);
+            console.log("User image uploaded:", url);
+            await db.collection("complaints").doc(docId).set({ imageUrl: url }, { merge: true });
+            session.data.imageUrl = url;
+            console.log("Firestore image saved:", url);
           } catch (err) {
-            console.error("Firestore pre-create error:", err);
-            session.step = "photo";
-          }
-        }
-
-        // ── Step: photo ───────────────────────────────────────────────────
-        else if (session.step === "photo") {
-          if (numMedia > 0 && mediaUrl) {
-            session.step = "location";
-            console.log("User image received. Uploading to Cloudinary...");
-            replyText = "📸 Photo received! Processing it.\n\nNow enter *location details* (area, landmark, street name):";
-
-            // Background: upload image
-            const docId = session.data.docId;
-            const trackingId = session.data.trackingId;
-            try {
-              const url = await uploadTwilioImageToCloudinary(mediaUrl, trackingId);
-              console.log("User image uploaded:", url);
-              await db.collection("complaints").doc(docId).set({ imageUrl: url }, { merge: true });
-              session.data.imageUrl = url;
-              console.log("Firestore image saved:", url);
-            } catch (err) {
-              console.log("Image upload failed:", err.message);
-              session.data.imageUrl = null;
-            }
-          } else if (incomingText === "skip") {
+            console.log("Image upload failed (silent):", err.message);
             session.data.imageUrl = null;
-            session.step = "location";
-            replyText = "No problem!\n\nNow enter *location details* (area, landmark, street name):";
-          } else {
-            replyText = "Please either:\n- Send a *photo* of the issue, or\n- Type *skip* to continue without one.";
           }
+
+        } else if (incomingText === "skip") {
+          session.data.imageUrl = null;
+          session.step = "location";
+          await sendOnce("Enter *location details* (area, landmark, street):");
+
+        } else {
+          await sendOnce("Send a *photo* of the issue, or type *skip* to continue.");
         }
 
-        // ── Step: location ────────────────────────────────────────────────
-        else if (session.step === "location") {
-          session.data.location = message;
-          session.step = "priority";
-          replyText = "Select *priority level*:\n\n1️⃣ - Urgent (resolved within 24 hrs)\n2️⃣ - Standard (resolved within 72 hrs)\n\nReply with 1 or 2:";
-        }
+      // ── Step: location ───────────────────────────────────────────────────
+      } else if (session.step === "location") {
+        session.data.location = message;
+        session.step = "priority";
+        await sendOnce("Select *priority*:\n\n1️⃣ Urgent (24 hrs)\n2️⃣ Standard (72 hrs)\n\nReply 1 or 2:");
 
-        // ── Step: priority => Finalize ────────────────────────────────────
-        else if (session.step === "priority") {
-          session.data.priority = message === "1" ? "Urgent" : "Standard";
-          const { docId, trackingId, priority, category, location, description, imageUrl } = {
-            docId: session.data.docId,
-            trackingId: session.data.trackingId,
-            priority: session.data.priority,
-            category: session.data.category,
-            location: session.data.location,
-            description: session.data.description,
-            imageUrl: session.data.imageUrl,
-          };
-          const trackingLink = `https://jansamadhan-ai.web.app/track?id=${trackingId}`;
-          replyText = `✅ Complaint registered!\n\nTracking ID: ${trackingId}\nCategory: ${category}\nPriority: ${priority}\nLocation: ${location}${imageUrl ? "\nPhoto: Attached ✅" : ""}\n\nTrack: ${trackingLink}\n\nYou will be notified when status updates.`;
+      // ── Step: priority => Finalize ───────────────────────────────────────
+      } else if (session.step === "priority") {
+        session.data.priority = message === "1" ? "Urgent" : "Standard";
+        const { docId, trackingId, priority, category, location, description, imageUrl } = session.data;
+        const trackingLink = `https://jansamadhan-ai.web.app/track?id=${trackingId}`;
 
-          delete sessions[sender];
+        // Send final confirmation ONCE before any async Firestore work
+        await sendOnce(
+          `✅ Complaint Registered!\n\nID: ${trackingId}\nCategory: ${category}\nPriority: ${priority}\nLocation: ${location}${imageUrl ? "\nPhoto: ✅ Attached" : ""}\n\nTrack: ${trackingLink}\n\nWe'll notify you on status updates.`
+        );
 
-          // Background: finalize Firestore + Groq reclassification
+        delete sessions[sender];
+
+        // Background: finalize Firestore + Groq reclassification (NO extra messages)
+        try {
+          await db.collection("complaints").doc(docId).set(
+            { location, priority, status: "Pending" }, { merge: true }
+          );
+          const finalDoc = await db.collection("complaints").doc(docId).get();
+          console.log(`Complaint finalized | ID: ${trackingId} | Image: ${finalDoc.data().imageUrl || "none"}`);
+
           try {
-            await db.collection("complaints").doc(docId).set(
-              { location, priority, status: "Pending" }, { merge: true }
-            );
-            const finalDoc = await db.collection("complaints").doc(docId).get();
-            const savedData = finalDoc.data();
-            console.log(`Complaint finalized | ID: ${trackingId} | Doc: ${docId} | Image: ${savedData.imageUrl || "none"}`);
-
-            try {
-              const aiCategory = await classifyWithGroq(description);
-              if (aiCategory) {
-                await db.collection("complaints").doc(docId).set({ category: aiCategory }, { merge: true });
-                console.log(`Groq reclassified => "${aiCategory}" (doc: ${docId})`);
-              }
-            } catch (err) {
-              console.log("Groq classification failed:", err.message);
+            const aiCategory = await classifyWithGroq(description);
+            if (aiCategory) {
+              await db.collection("complaints").doc(docId).set({ category: aiCategory }, { merge: true });
+              console.log(`Groq reclassified => "${aiCategory}" (doc: ${docId})`);
             }
           } catch (err) {
-            console.error("Priority finalize error:", err);
+            console.log("Groq classification skipped:", err.message);
           }
+        } catch (err) {
+          console.error("Priority finalize error:", err);
         }
 
-        // ── Fallback ──────────────────────────────────────────────────────
-        else {
-          replyText = "Send any message to start a new complaint.\n\nTo track: track JS-XXXX";
-        }
-      }
-
-      // ── Send reply via REST API ───────────────────────────────────────────
-      if (replyText) {
-        console.log("Sending reply via REST API:", replyText.substring(0, 80));
-        await sendWhatsAppUpdate(sender, replyText);
+      // ── Fallback ─────────────────────────────────────────────────────────
+      } else {
+        await sendOnce("Send any message to start a new complaint.\n\nTo check status: track JS-XXXX");
       }
 
     } catch (err) {
