@@ -16,7 +16,7 @@ A Node.js + Express backend service for the JanSamadhan civic complaint manageme
 ### 3. Tracking & User Notifications
 - **Unique Tracking IDs:** Generates a unique `JS-<timestamp>` ID for every complaint.
 - **`track` Command:** Users can message `track JS-XXXXX` to instantly get the status, category, priority, and location of their complaint.
-- **Web Tracking Link:** Provides a direct link in the response to track the complaint on the frontend (`https://jansamadhan-ai.web.app/track?id=...`).
+- **Web Tracking Link:** Provides a direct link in the response to track the complaint on the frontend (`https://jan-samadhan-ai.vercel.app/track?id=...`).
 - **Outbound WhatsApp Notifications:** Includes an endpoint `/update-status` that admins can hit to update a complaint's status in Firestore. Doing so automatically sends an outbound WhatsApp message to the citizen notifying them of the change.
 
 ### 4. Firebase Firestore Integration

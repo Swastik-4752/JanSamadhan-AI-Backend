@@ -142,7 +142,7 @@ app.post("/update-status", async (req, res) => {
 
     const msgBody = isResolved
       ? `✅ Complaint Resolved!\n\nTracking ID: ${data.trackingId}\nCategory: ${data.category}\n\nThank you for using JanSamadhan.`
-      : `📋 Update: Your complaint *${data.trackingId}* is now *${newStatus}*.\n\nTrack: https://jansamadhan-ai.web.app/track?id=${data.trackingId}`;
+      : `📋 Update: Your complaint *${data.trackingId}* is now *${newStatus}*.\n\nTrack: https://jan-samadhan-ai.vercel.app/track?id=${data.trackingId}`;
 
     await sendWhatsAppUpdate(data.phone, msgBody, notifImage);
     return res.json({ success: true, trackingId, newStatus });
@@ -259,7 +259,7 @@ app.post("/webhook/whatsapp", (req, res) => {
             } else {
               const data = snapshot.docs[0].data();
               await sendOnce(
-                `📋 Complaint Status\n\nID: ${data.trackingId}\nStatus: *${data.status}*\nCategory: ${data.category}\nLocation: ${data.location}\nPriority: ${data.priority}\n\nTrack: https://jansamadhan-ai.web.app/track?id=${data.trackingId}`
+                `📋 Complaint Status\n\nID: ${data.trackingId}\nStatus: *${data.status}*\nCategory: ${data.category}\nLocation: ${data.location}\nPriority: ${data.priority}\n\nTrack: https://jan-samadhan-ai.vercel.app/track?id=${data.trackingId}`
               );
             }
           } catch (err) {
@@ -357,7 +357,7 @@ app.post("/webhook/whatsapp", (req, res) => {
       } else if (session.step === "priority") {
         session.data.priority = message === "1" ? "Urgent" : "Standard";
         const { docId, trackingId, priority, category, location, description, imageUrl } = session.data;
-        const trackingLink = `https://jansamadhan-ai.web.app/track?id=${trackingId}`;
+        const trackingLink = `https://jan-samadhan-ai.vercel.app/track?id=${trackingId}`;
 
         // Send final confirmation ONCE before any async Firestore work
         await sendOnce(
