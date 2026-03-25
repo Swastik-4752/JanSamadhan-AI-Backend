@@ -130,21 +130,26 @@ app.post("/update-status", async (req, res) => {
     const updatePayload = { status: newStatus };
     if (isResolved && resolutionImageUrl) {
       updatePayload.resolutionImageUrl = resolutionImageUrl;
+      updatePayload.resolutionPhotoUrl = resolutionImageUrl; // alias used in WhatsApp message
       console.log("Admin resolution image saved to Firestore:", resolutionImageUrl);
     }
     await doc.ref.set(updatePayload, { merge: true });
     console.log(`Status updated: ${trackingId} => ${newStatus}`);
 
-    // Pick image to send in notification — prefer admin-supplied, fall back to stored
-    const notifImage = isResolved
-      ? (resolutionImageUrl || data.resolutionImageUrl || null)
+    // Pick image to send — only attach for Resolved, never for other statuses
+    const resolutionPhotoUrl = isResolved
+      ? (resolutionImageUrl || data.resolutionPhotoUrl || data.resolutionImageUrl || null)
       : null;
 
+    if (isResolved && resolutionPhotoUrl) {
+      console.log("Sending resolution image:", resolutionPhotoUrl);
+    }
+
     const msgBody = isResolved
-      ? `✅ Complaint Resolved!\n\nTracking ID: ${data.trackingId}\nCategory: ${data.category}\n\nThank you for using JanSamadhan.`
+      ? `✅ Complaint Resolved!\n\nTracking ID: ${data.trackingId}\nCategory: ${data.category}\n\nView details: https://jan-samadhan-ai.vercel.app/track?id=${data.trackingId}`
       : `📋 Update: Your complaint *${data.trackingId}* is now *${newStatus}*.\n\nTrack: https://jan-samadhan-ai.vercel.app/track?id=${data.trackingId}`;
 
-    await sendWhatsAppUpdate(data.phone, msgBody, notifImage);
+    await sendWhatsAppUpdate(data.phone, msgBody, resolutionPhotoUrl);
     return res.json({ success: true, trackingId, newStatus });
 
   } catch (error) {
@@ -182,20 +187,26 @@ app.post("/admin/update-status", async (req, res) => {
     const updatePayload = { status: newStatus };
     if (isResolved && resolutionImageUrl) {
       updatePayload.resolutionImageUrl = resolutionImageUrl;
+      updatePayload.resolutionPhotoUrl = resolutionImageUrl; // alias used in WhatsApp message
       console.log("Admin resolution image saved to Firestore:", resolutionImageUrl);
     }
     await docRef.set(updatePayload, { merge: true });
     console.log(`Admin status updated: ${docId} => ${newStatus}`);
 
-    const notifImage = isResolved
-      ? (resolutionImageUrl || complaint.resolutionImageUrl || null)
+    // Pick image to send — only attach for Resolved, never for other statuses
+    const resolutionPhotoUrl = isResolved
+      ? (resolutionImageUrl || complaint.resolutionPhotoUrl || complaint.resolutionImageUrl || null)
       : null;
 
+    if (isResolved && resolutionPhotoUrl) {
+      console.log("Sending resolution image:", resolutionPhotoUrl);
+    }
+
     const msgBody = isResolved
-      ? `✅ Complaint Resolved!\n\nTracking ID: ${complaint.trackingId}\nCategory: ${complaint.category}\n\nThank you for using JanSamadhan.`
+      ? `✅ Complaint Resolved!\n\nTracking ID: ${complaint.trackingId}\nCategory: ${complaint.category}\n\nView details: https://jan-samadhan-ai.vercel.app/track?id=${complaint.trackingId}`
       : `📋 Update: Your complaint *${complaint.trackingId}* is now *${newStatus}*`;
 
-    await sendWhatsAppUpdate(complaint.phone, msgBody, notifImage);
+    await sendWhatsAppUpdate(complaint.phone, msgBody, resolutionPhotoUrl);
     res.json({ success: true, trackingId: complaint.trackingId, status: newStatus });
 
   } catch (error) {
