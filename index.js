@@ -434,6 +434,18 @@ app.listen(PORT, () => {
   console.log(`  Webhook       : http://localhost:${PORT}/webhook/whatsapp`);
   console.log(`  Update Status : POST http://localhost:${PORT}/update-status`);
   console.log(`  Admin Panel   : POST http://localhost:${PORT}/admin/update-status`);
+
+  // ─── Keep-alive: prevent Render free tier cold starts ────────────────────
+  // Twilio times out after 15s; Render cold starts take 50s+ — this keeps it warm
+  const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
+  if (RENDER_URL) {
+    setInterval(() => {
+      fetch(`${RENDER_URL}/`)
+        .then(() => console.log("Keep-alive ping sent"))
+        .catch((err) => console.log("Keep-alive ping failed:", err.message));
+    }, 4 * 60 * 1000); // every 4 minutes
+    console.log(`  Keep-alive    : pinging ${RENDER_URL}/ every 4 min`);
+  }
 });
 
 module.exports = { sendWhatsAppUpdate };
