@@ -4,6 +4,7 @@ const bodyParser = require("body-parser");
 const cors = require("cors");
 const fetch = require("node-fetch");
 const twilio = require("twilio");
+const MessagingResponse = twilio.twiml.MessagingResponse;
 const db = require("./firebase");
 const { uploadTwilioImageToCloudinary } = require("./cloudinary");
 
@@ -207,6 +208,9 @@ app.post("/admin/update-status", async (req, res) => {
 
 // ─── WhatsApp Webhook ─────────────────────────────────────────────────────────
 app.post("/webhook/whatsapp", (req, res) => {
+  const twiml = new MessagingResponse();
+  let replyText = "";
+
   try {
     const message = (req.body.Body || "").trim();
     const sender = req.body.From;
@@ -219,218 +223,208 @@ app.post("/webhook/whatsapp", (req, res) => {
     console.log(`Message: ${message}`);
     if (numMedia > 0) console.log(`Media  : ${mediaUrl}`);
 
-    // ── Helper to send TwiML instantly ─────────────────────────────────────
-    const sendTwiML = (text) => {
-      res.writeHead(200, { "Content-Type": "text/xml" });
-      res.end(`<Response><Message>${text}</Message></Response>`);
-    };
-
     // ── TRACK COMMAND ──────────────────────────────────────────────────────
     if (incomingText.startsWith("track")) {
       const parts = message.trim().split(/\s+/);
       const trackingId = parts[1];
 
       if (!trackingId) {
-        return sendTwiML("Please provide your tracking ID:\n\ntrack JS-1234567890");
-      }
+        replyText = "Please provide your tracking ID:\n\ntrack JS-1234567890";
+      } else {
+        replyText = "🔍 Looking up your complaint... You'll receive status details shortly.";
 
-      // ✅ RESPOND IMMEDIATELY
-      sendTwiML("🔍 Looking up your complaint... You'll receive status details shortly.");
+        // 🚨 AFTER RESPONSE — fetch from Firestore and send via REST API
+        setImmediate(async () => {
+          try {
+            const snapshot = await db.collection("complaints")
+              .where("trackingId", "==", trackingId.toUpperCase())
+              .get();
 
-      // 🚨 AFTER RESPONSE — fetch from Firestore and send via REST API
-      setImmediate(async () => {
-        try {
-          const snapshot = await db.collection("complaints")
-            .where("trackingId", "==", trackingId.toUpperCase())
-            .get();
+            if (snapshot.empty) {
+              await sendWhatsAppUpdate(sender, `No complaint found for tracking ID: ${trackingId}`);
+              return;
+            }
 
-          if (snapshot.empty) {
-            await sendWhatsAppUpdate(sender, `No complaint found for tracking ID: ${trackingId}`);
-            return;
+            const data = snapshot.docs[0].data();
+            const statusMsg =
+              `Complaint Status\n\nTracking ID: ${data.trackingId}\nStatus: ${data.status}\nCategory: ${data.category}\nLocation: ${data.location}\nPriority: ${data.priority}\n\nTrack: https://jansamadhan-ai.web.app/track?id=${data.trackingId}`;
+            await sendWhatsAppUpdate(sender, statusMsg);
+          } catch (err) {
+            console.error("Track lookup error:", err);
+            await sendWhatsAppUpdate(sender, "Could not fetch complaint status. Please try again.");
           }
-
-          const data = snapshot.docs[0].data();
-          const statusMsg =
-            `Complaint Status\n\nTracking ID: ${data.trackingId}\nStatus: ${data.status}\nCategory: ${data.category}\nLocation: ${data.location}\nPriority: ${data.priority}\n\nTrack: https://jansamadhan-ai.web.app/track?id=${data.trackingId}`;
-          await sendWhatsAppUpdate(sender, statusMsg);
-        } catch (err) {
-          console.error("Track lookup error:", err);
-          await sendWhatsAppUpdate(sender, "Could not fetch complaint status. Please try again.");
-        }
-      });
-
-      return;
+        });
+      }
     }
 
     // ── No session => Start flow ───────────────────────────────────────────
-    if (!sessions[sender]) {
+    else if (!sessions[sender]) {
       sessions[sender] = { step: "name", data: { phone: sender } };
-      return sendTwiML("Welcome to JanSamadhan AI\n\nYour complaints reach the right authorities instantly.\n\nPlease enter your *full name* to begin:\n\n(To track: track JS-XXXX)");
+      replyText = "Welcome to JanSamadhan AI\n\nYour complaints reach the right authorities instantly.\n\nPlease enter your *full name* to begin:\n\n(To track: track JS-XXXX)";
     }
 
-    const session = sessions[sender];
-    console.log(`Step   : ${session.step}`);
+    else {
+      const session = sessions[sender];
+      console.log(`Step   : ${session.step}`);
 
-    // ── Step: name ─────────────────────────────────────────────────────────
-    if (session.step === "name") {
-      session.data.name = message;
-      session.step = "description";
-      return sendTwiML(`Hello ${xmlEscape(session.data.name)}!\n\nPlease *describe your complaint* in detail:`);
-    }
+      // ── Step: name ─────────────────────────────────────────────────────────
+      if (session.step === "name") {
+        session.data.name = message;
+        session.step = "description";
+        replyText = `Hello ${xmlEscape(session.data.name)}!\n\nPlease *describe your complaint* in detail:`;
+      }
 
-    // ── Step: description ─────────────────────────────────────────────────
-    else if (session.step === "description") {
-      session.data.description = message;
-      const category = keywordClassify(message);
-      session.data.category = category;
+      // ── Step: description ─────────────────────────────────────────────────
+      else if (session.step === "description") {
+        session.data.description = message;
+        const category = keywordClassify(message);
+        session.data.category = category;
 
-      // Generate trackingId now so photo step can merge imageUrl into it
-      const trackingId = "JS-" + Date.now();
-      session.data.trackingId = trackingId;
+        // Generate trackingId now so photo step can merge imageUrl into it
+        const trackingId = "JS-" + Date.now();
+        session.data.trackingId = trackingId;
 
-      // ✅ RESPOND IMMEDIATELY
-      sendTwiML(`Category detected: ${xmlEscape(category)}\n\nPlease upload a *photo* of the issue, or type *skip* to continue:`);
+        replyText = `Category detected: ${xmlEscape(category)}\n\nPlease upload a *photo* of the issue, or type *skip* to continue:`;
 
-      // 🚨 AFTER RESPONSE — pre-create Firestore skeleton doc
-      setImmediate(async () => {
-        try {
-          const skeletonDoc = {
-            name: session.data.name,
-            phone: session.data.phone,
-            description: message,
-            category: category,
-            status: "Draft",
-            imageUrl: null,
-            resolutionImageUrl: null,
-            trackingId: trackingId,
-            source: "WhatsApp",
-            createdAt: new Date(),
-          };
-          const docRef = await db.collection("complaints").add(skeletonDoc);
-          session.data.docId = docRef.id;
-          session.step = "photo";
-          console.log(`Pre-created Firestore doc: ${docRef.id} | trackingId: ${trackingId}`);
-        } catch (err) {
-          console.error("Firestore pre-create error:", err);
-          session.step = "photo"; // still advance so user isn't stuck
-        }
-      });
-
-      return;
-    }
-
-    // ── Step: photo ───────────────────────────────────────────────────────
-    else if (session.step === "photo") {
-      if (numMedia > 0 && mediaUrl) {
-        session.step = "location";
-        console.log("User image received. Uploading to Cloudinary...");
-
-        // ✅ RESPOND IMMEDIATELY
-        sendTwiML("Photo received! Processing it now.\n\nNow enter *location details* (area, landmark, street name):");
-
-        // 🚨 AFTER RESPONSE — upload + save to Firestore
-        const docId = session.data.docId;
-        const trackingId = session.data.trackingId;
-
+        // 🚨 AFTER RESPONSE — pre-create Firestore skeleton doc
         setImmediate(async () => {
           try {
-            const url = await uploadTwilioImageToCloudinary(mediaUrl, trackingId);
-            console.log("User image uploaded:", url);
+            const skeletonDoc = {
+              name: session.data.name,
+              phone: session.data.phone,
+              description: message,
+              category: category,
+              status: "Draft",
+              imageUrl: null,
+              resolutionImageUrl: null,
+              trackingId: trackingId,
+              source: "WhatsApp",
+              createdAt: new Date(),
+            };
+            const docRef = await db.collection("complaints").add(skeletonDoc);
+            session.data.docId = docRef.id;
+            session.step = "photo"; // Advance step in the session for next message
+            console.log(`Pre-created Firestore doc: ${docRef.id} | trackingId: ${trackingId}`);
+          } catch (err) {
+            console.error("Firestore pre-create error:", err);
+            session.step = "photo"; // still advance so user isn't stuck
+          }
+        });
+      }
 
+      // ── Step: photo ───────────────────────────────────────────────────────
+      else if (session.step === "photo") {
+        if (numMedia > 0 && mediaUrl) {
+          session.step = "location";
+          console.log("User image received. Uploading to Cloudinary...");
+
+          replyText = "Photo received! Processing it now.\n\nNow enter *location details* (area, landmark, street name):";
+
+          // 🚨 AFTER RESPONSE — upload + save to Firestore
+          const docId = session.data.docId;
+          const trackingId = session.data.trackingId;
+
+          setImmediate(async () => {
+            try {
+              const url = await uploadTwilioImageToCloudinary(mediaUrl, trackingId);
+              console.log("User image uploaded:", url);
+
+              await db.collection("complaints").doc(docId).set(
+                { imageUrl: url },
+                { merge: true }
+              );
+
+              const verification = await db.collection("complaints").doc(docId).get();
+              console.log("Firestore after image save:", JSON.stringify(verification.data()));
+
+              session.data.imageUrl = url;
+            } catch (err) {
+              console.log("Image upload failed:", err.message);
+              session.data.imageUrl = null;
+            }
+          });
+
+        } else if (incomingText === "skip") {
+          session.data.imageUrl = null;
+          session.step = "location";
+          replyText = "No problem!\n\nNow enter *location details* (area, landmark, street name):";
+
+        } else {
+          replyText = "Please either:\n- Send a *photo* of the issue, or\n- Type *skip* to continue without one.";
+        }
+      }
+
+      // ── Step: location ─────────────────────────────────────────────────────
+      else if (session.step === "location") {
+        session.data.location = message;
+        session.step = "priority";
+        replyText = "Select *priority level*:\n\n1 - Urgent (resolved within 24 hrs)\n2 - Standard (resolved within 72 hrs)\n\nReply with 1 or 2:";
+      }
+
+      // ── Step: priority => Finalize complaint in Firestore ─────────────────
+      else if (session.step === "priority") {
+        session.data.priority = message === "1" ? "Urgent" : "Standard";
+
+        const docId = session.data.docId;
+        const trackingId = session.data.trackingId;
+        const trackingLink = `https://jansamadhan-ai.web.app/track?id=${trackingId}`;
+        const priority = session.data.priority;
+        const category = session.data.category;
+        const location = session.data.location;
+        const description = session.data.description;
+        const hasImage = !!session.data.imageUrl;
+
+        replyText = `Complaint registered successfully\n\nTracking ID: ${xmlEscape(trackingId)}\nCategory: ${xmlEscape(category)}\nPriority: ${xmlEscape(priority)}\nLocation: ${xmlEscape(location)}${hasImage ? "\nPhoto: Attached" : ""}\n\nTrack: ${trackingLink}\n\nYou will be notified when status updates.`;
+
+        delete sessions[sender];
+
+        // 🚨 AFTER RESPONSE — finalize Firestore + Groq reclassification
+        setImmediate(async () => {
+          try {
             await db.collection("complaints").doc(docId).set(
-              { imageUrl: url },
+              { location, priority, status: "Pending" },
               { merge: true }
             );
 
-            const verification = await db.collection("complaints").doc(docId).get();
-            console.log("Firestore after image save:", JSON.stringify(verification.data()));
+            const finalDoc = await db.collection("complaints").doc(docId).get();
+            const savedData = finalDoc.data();
+            console.log(`Complaint finalized | ID: ${trackingId} | Doc: ${docId} | Image: ${savedData.imageUrl || "none"}`);
+            console.log("Final Firestore doc:", JSON.stringify(savedData));
 
-            session.data.imageUrl = url;
+            // Groq AI reclassification (best-effort)
+            try {
+              const aiCategory = await classifyWithGroq(description);
+              if (aiCategory) {
+                await db.collection("complaints").doc(docId).set({ category: aiCategory }, { merge: true });
+                console.log(`Groq reclassified => "${aiCategory}" (doc: ${docId})`);
+              }
+            } catch (err) {
+              console.log("Groq background update failed:", err.message);
+            }
           } catch (err) {
-            console.log("Image upload failed:", err.message);
-            session.data.imageUrl = null;
+            console.error("Priority finalize error:", err);
           }
         });
+      }
 
-        return;
-
-      } else if (incomingText === "skip") {
-        session.data.imageUrl = null;
-        session.step = "location";
-        return sendTwiML("No problem!\n\nNow enter *location details* (area, landmark, street name):");
-
-      } else {
-        return sendTwiML("Please either:\n- Send a *photo* of the issue, or\n- Type *skip* to continue without one.");
+      // ── Fallback ─────────────────────────────────────────────────────────
+      else {
+        replyText = "Send any message to start a new complaint.\n\nTo track: track JS-XXXX";
       }
     }
 
-    // ── Step: location ─────────────────────────────────────────────────────
-    else if (session.step === "location") {
-      session.data.location = message;
-      session.step = "priority";
-      return sendTwiML("Select *priority level*:\n\n1 - Urgent (resolved within 24 hrs)\n2 - Standard (resolved within 72 hrs)\n\nReply with 1 or 2:");
-    }
-
-    // ── Step: priority => Finalize complaint in Firestore ─────────────────
-    else if (session.step === "priority") {
-      session.data.priority = message === "1" ? "Urgent" : "Standard";
-
-      const docId = session.data.docId;
-      const trackingId = session.data.trackingId;
-      const trackingLink = `https://jansamadhan-ai.web.app/track?id=${trackingId}`;
-      const priority = session.data.priority;
-      const category = session.data.category;
-      const location = session.data.location;
-      const description = session.data.description;
-      const hasImage = !!session.data.imageUrl;
-
-      // ✅ RESPOND IMMEDIATELY using known session data (no Firestore read)
-      sendTwiML(
-        `Complaint registered successfully\n\nTracking ID: ${xmlEscape(trackingId)}\nCategory: ${xmlEscape(category)}\nPriority: ${xmlEscape(priority)}\nLocation: ${xmlEscape(location)}${hasImage ? "\nPhoto: Attached" : ""}\n\nTrack: ${trackingLink}\n\nYou will be notified when status updates.`
-      );
-
-      delete sessions[sender];
-
-      // 🚨 AFTER RESPONSE — finalize Firestore + Groq reclassification
-      setImmediate(async () => {
-        try {
-          await db.collection("complaints").doc(docId).set(
-            { location, priority, status: "Pending" },
-            { merge: true }
-          );
-
-          const finalDoc = await db.collection("complaints").doc(docId).get();
-          const savedData = finalDoc.data();
-          console.log(`Complaint finalized | ID: ${trackingId} | Doc: ${docId} | Image: ${savedData.imageUrl || "none"}`);
-          console.log("Final Firestore doc:", JSON.stringify(savedData));
-
-          // Groq AI reclassification (best-effort)
-          try {
-            const aiCategory = await classifyWithGroq(description);
-            if (aiCategory) {
-              await db.collection("complaints").doc(docId).set({ category: aiCategory }, { merge: true });
-              console.log(`Groq reclassified => "${aiCategory}" (doc: ${docId})`);
-            }
-          } catch (err) {
-            console.log("Groq background update failed:", err.message);
-          }
-        } catch (err) {
-          console.error("Priority finalize error:", err);
-        }
-      });
-
-      return;
-    }
-
-    // ── Fallback ───────────────────────────────────────────────────────────
-    else {
-      return sendTwiML("Send any message to start a new complaint.\n\nTo track: track JS-XXXX");
-    }
-
-  } catch (error) {
-    console.error("Webhook error:", error);
+    // ── ALWAYS send TwiML ─────────────────────────────────────────────────
+    twiml.message(replyText);
+    console.log("Replying with:", replyText.substring(0, 80));
     res.writeHead(200, { "Content-Type": "text/xml" });
-    res.end(`<Response><Message>Something went wrong. Please try again.</Message></Response>`);
+    res.end(twiml.toString());
+
+  } catch (err) {
+    console.error("Webhook error:", err);
+    const fallback = new twilio.twiml.MessagingResponse();
+    fallback.message("Server error, please try again.");
+    res.writeHead(200, { "Content-Type": "text/xml" });
+    res.end(fallback.toString());
   }
 });
 
